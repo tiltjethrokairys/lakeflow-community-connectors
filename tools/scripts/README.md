@@ -105,3 +105,48 @@ def register_lakeflow_source(spark):
 python3 tools/scripts/merge_python_source.py --help
 ```
 
+## stream_to_files_local.py
+
+Local dev harness that runs any connector's `lakeflow_connect` streaming Data Source straight into a **file sink** (parquet/json/csv) with a `checkpointLocation` and `Trigger.AvailableNow` — i.e. ingestion output to files instead of Delta tables, with no Databricks runtime and no Unity Catalog.
+
+Use it to sanity-check a connector's streaming/offset path on your laptop, and to **see** incremental vs snapshot behaviour: pass `--rounds N` and watch whether the checkpoint suppresses already-seen rows (a real incremental cursor) or the source re-reads in full each round (a snapshot, whose offset is just an init-time token).
+
+### Usage
+
+```bash
+# Run with the project venv so Spark's Python workers use a 3.10+ interpreter.
+.venv/bin/python tools/scripts/stream_to_files_local.py <source> <table> [-o KEY=VALUE ...] [options]
+```
+
+There is no Unity Catalog locally, so there is no connection to inject — pass the connector's own options directly with `-o/--option` instead of `.option("databricks.connection", ...)`.
+
+Options: `--format {parquet,json,csv}` (default parquet), `--rounds N` (default 1), `--out DIR`, `--checkpoint DIR`, `--master` (default `local[2]`), `--keep` (don't delete temp dirs).
+
+### Examples
+
+```bash
+# Incremental source (example: in-process synthetic, no auth, offline).
+# Round 2 only picks up rows past the checkpointed cursor.
+.venv/bin/python tools/scripts/stream_to_files_local.py example events \
+    -o username=simulator-user -o password=simulator-fake-password --rounds 2
+
+# Snapshot source (pokeapi, live, no auth). Each round re-reads -> rows grow.
+.venv/bin/python tools/scripts/stream_to_files_local.py pokeapi generation \
+    -o base_url=https://pokeapi.co/api/v2 --rounds 2
+
+# Write JSON and keep the output dir for inspection.
+.venv/bin/python tools/scripts/stream_to_files_local.py pokeapi type \
+    -o base_url=https://pokeapi.co/api/v2 --format json --keep
+```
+
+### Requirements
+
+- Run it with an interpreter that is Python 3.10+ (the project venv). The script pins `PYSPARK_PYTHON`/`PYSPARK_DRIVER_PYTHON` to `sys.executable` so Spark's workers match — otherwise Spark may launch workers with a system `python3` < 3.10 and the framework's `X | None` type hints raise `TypeError: unsupported operand type(s) for |`.
+- `pyarrow` (required by the Spark Python Data Source API; not in the `dev` extra). Install with `uv pip install pyarrow`.
+
+### Help
+
+```bash
+.venv/bin/python tools/scripts/stream_to_files_local.py --help
+```
+
