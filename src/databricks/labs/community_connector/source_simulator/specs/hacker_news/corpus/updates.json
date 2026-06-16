@@ -1,0 +1,45 @@
+[
+  {
+    "items": [
+      93671,
+      93749
+    ],
+    "profiles": [
+      "victor-968",
+      "xray-289"
+    ],
+    "snapshot_time": "echo-645"
+  },
+  {
+    "items": [
+      44589,
+      72506
+    ],
+    "profiles": [],
+    "snapshot_time": "quebec-903"
+  },
+  {
+    "items": [],
+    "profiles": [
+      "delta-813"
+    ],
+    "snapshot_time": "tango-950"
+  },
+  {
+    "items": [
+      61949
+    ],
+    "profiles": [],
+    "snapshot_time": "foxtrot-216"
+  },
+  {
+    "items": [
+      68480
+    ],
+    "profiles": [
+      "yankee-146",
+      "victor-578"
+    ],
+    "snapshot_time": "charlie-896"
+  }
+]

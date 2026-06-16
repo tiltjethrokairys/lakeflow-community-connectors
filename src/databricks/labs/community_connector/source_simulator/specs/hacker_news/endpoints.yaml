@@ -1,0 +1,53 @@
+# Hacker News Firebase API (https://hacker-news.firebaseio.com/v0/).
+#
+# The HN API is fully public (no auth) and id-addressed rather than
+# list-paginated, so none of its responses fit the declarative
+# corpus + pagination_style model:
+#
+#   * /maxitem.json          -> a bare integer, monotonic across runs
+#   * /item/{id}.json        -> a single item dict, or null for gap/deleted ids
+#   * /updates.json          -> {"items": [...], "profiles": [...]}
+#   * /{top,new,best}stories.json -> a bare array of integers
+#
+# Every endpoint therefore uses the Python escape-hatch ``handler:`` (see
+# DESIGN.md "Filter operators" / custom handler section). The handlers live
+# under specs/hacker_news/handlers/ so they are never inlined by
+# merge_python_source.py (same organization as gmail/qualtrics).
+#
+# Incremental progression: handlers/hn.py:maxitem returns _MAXITEM_BASE on the
+# first request and advances by _MAXITEM_STEP on every subsequent request. The
+# connector snapshots maxitem once per run, so each fresh run sees a higher
+# high-water mark and the ``items`` append stream reads ONLY the new ids past
+# the previous run's checkpoint. Termination is offset-driven (the connector
+# caps its offset at its own init-time maxitem snapshot), so no
+# ``synthesize_future_records`` directive is needed here — it is a
+# timestamp-cursor mechanism and ``items`` uses an integer id cursor.
+
+endpoints:
+  # ---- id high-water mark (bare integer, monotonic across runs) ----
+  - path: /v0/maxitem.json
+    method: GET
+    handler: databricks.labs.community_connector.source_simulator.specs.hacker_news.handlers.hn:maxitem
+
+  # ---- single item by id (deterministic per id; null for gap/deleted) ----
+  - path: /v0/item/{id}.json
+    method: GET
+    handler: databricks.labs.community_connector.source_simulator.specs.hacker_news.handlers.hn:item
+
+  # ---- recent-changes feed ({items, profiles}) ----
+  - path: /v0/updates.json
+    method: GET
+    handler: databricks.labs.community_connector.source_simulator.specs.hacker_news.handlers.hn:updates
+
+  # ---- ranked story-id lists (bare integer arrays) ----
+  - path: /v0/topstories.json
+    method: GET
+    handler: databricks.labs.community_connector.source_simulator.specs.hacker_news.handlers.hn:topstories
+
+  - path: /v0/newstories.json
+    method: GET
+    handler: databricks.labs.community_connector.source_simulator.specs.hacker_news.handlers.hn:newstories
+
+  - path: /v0/beststories.json
+    method: GET
+    handler: databricks.labs.community_connector.source_simulator.specs.hacker_news.handlers.hn:beststories

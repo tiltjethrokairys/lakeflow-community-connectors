@@ -1,0 +1,26 @@
+# Hacker News Community Connector Spec
+# This file defines the specification for the connector including
+# connection parameters and allowlist options.
+
+# ============================================================================
+# Connection Parameters
+# These are provided when creating the Unity Catalog connection.
+# The Hacker News API is fully public with no authentication required.
+# ============================================================================
+display_name: Hacker News
+connection:
+  parameters:
+    - name: base_url
+      type: string
+      required: false
+      description: >
+        Base URL for the Hacker News Firebase API.
+        Defaults to https://hacker-news.firebaseio.com/v0
+
+# ============================================================================
+# External Options Allowlist
+# These table-specific options must be included in the externalOptionsAllowList
+# parameter of the UC connection to allow them to be passed through.
+# Use a comma-separated string of option names.
+# ============================================================================
+external_options_allowlist: "start_item_id,start_item_id_lookback,max_records_per_batch,partition_size,fetch_concurrency"

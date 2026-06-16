@@ -1,0 +1,112 @@
+[
+  {
+    "id": 1000,
+    "type": "kilo-435",
+    "by": "xray-479",
+    "time": 29653,
+    "deleted": true,
+    "dead": false,
+    "title": "zulu-283",
+    "url": "mike-677",
+    "text": "quebec-924",
+    "score": 62148,
+    "descendants": 79553,
+    "kids": [
+      16554
+    ],
+    "parent": 5766,
+    "poll": 45040,
+    "parts": [
+      55443,
+      68198
+    ]
+  },
+  {
+    "id": 1001,
+    "type": "papa-689",
+    "by": "yankee-484",
+    "time": 25648,
+    "deleted": false,
+    "dead": false,
+    "title": "juliet-743",
+    "url": "india-823",
+    "text": "alpha-852",
+    "score": 52271,
+    "descendants": 67940,
+    "kids": [
+      45666
+    ],
+    "parent": 23254,
+    "poll": 34218,
+    "parts": [
+      35359
+    ]
+  },
+  {
+    "id": 1002,
+    "type": "november-792",
+    "by": "delta-521",
+    "time": 61097,
+    "deleted": true,
+    "dead": false,
+    "title": "romeo-850",
+    "url": "foxtrot-820",
+    "text": "echo-419",
+    "score": 49788,
+    "descendants": 13868,
+    "kids": [
+      77422,
+      29411
+    ],
+    "parent": 42876,
+    "poll": 42890,
+    "parts": [
+      62145,
+      9105
+    ]
+  },
+  {
+    "id": 1003,
+    "type": "quebec-523",
+    "by": "yankee-772",
+    "time": 14193,
+    "deleted": true,
+    "dead": false,
+    "title": "whiskey-426",
+    "url": "xray-780",
+    "text": "sierra-437",
+    "score": 56326,
+    "descendants": 10855,
+    "kids": [
+      67580
+    ],
+    "parent": 91571,
+    "poll": 69219,
+    "parts": [
+      54878
+    ]
+  },
+  {
+    "id": 1004,
+    "type": "oscar-146",
+    "by": "golf-797",
+    "time": 60071,
+    "deleted": true,
+    "dead": true,
+    "title": "november-306",
+    "url": "foxtrot-570",
+    "text": "juliet-314",
+    "score": 81938,
+    "descendants": 57478,
+    "kids": [
+      28092,
+      44565
+    ],
+    "parent": 87386,
+    "poll": 87856,
+    "parts": [
+      80875,
+      59944
+    ]
+  }
+]
