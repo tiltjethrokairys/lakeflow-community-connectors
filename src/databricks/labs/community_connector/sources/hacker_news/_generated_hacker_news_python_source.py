@@ -687,23 +687,27 @@ def register_lakeflow_source(spark):
             "cursor_field": "id",
             "ingestion_type": "append",
         },
+        # ``updates`` emits exactly one row per run holding the recent-changes
+        # arrays; the snapshot timestamp uniquely identifies that row.
         UPDATES_TABLE: {
-            "primary_keys": [],
+            "primary_keys": ["snapshot_time"],
             "cursor_field": None,
             "ingestion_type": "snapshot",
         },
+        # The ranked-story lists emit one row per story id; ``story_id`` is the
+        # natural per-row key within a snapshot.
         TOPSTORIES_TABLE: {
-            "primary_keys": [],
+            "primary_keys": ["story_id"],
             "cursor_field": None,
             "ingestion_type": "snapshot",
         },
         NEWSTORIES_TABLE: {
-            "primary_keys": [],
+            "primary_keys": ["story_id"],
             "cursor_field": None,
             "ingestion_type": "snapshot",
         },
         BESTSTORIES_TABLE: {
-            "primary_keys": [],
+            "primary_keys": ["story_id"],
             "cursor_field": None,
             "ingestion_type": "snapshot",
         },
@@ -747,6 +751,13 @@ def register_lakeflow_source(spark):
             # (the first time it is needed) so __init__ stays cheap and the
             # instance carries no eager network state.
             self._init_max_id_cache: Optional[int] = None
+            # Init-time token stamped on every snapshot-table micro-batch. The
+            # snapshot tables have no natural cursor, but Spark forbids emitting a
+            # non-empty batch without advancing the offset; this token is the
+            # synthetic offset that advances once then converges. See
+            # ``_snapshot_end_offset`` for the full rationale. A string is
+            # picklable, so it travels intact when Spark ships the reader.
+            self._init_time = datetime.now(timezone.utc).isoformat()
 
         # ------------------------------------------------------------------
         # HTTP helpers
@@ -839,9 +850,9 @@ def register_lakeflow_source(spark):
             """
             self._validate_table(table_name)
             if table_name == UPDATES_TABLE:
-                return self._read_updates_snapshot(table_options)
+                return self._read_updates_snapshot(start_offset, table_options)
             if table_name in STORY_LIST_TABLES:
-                return self._read_story_list_snapshot(table_name, table_options)
+                return self._read_story_list_snapshot(table_name, start_offset, table_options)
             if table_name == ITEMS_TABLE:
                 return self._read_items_sequential(start_offset, table_options)
             raise ValueError(f"Unhandled table '{table_name}'")
@@ -850,7 +861,14 @@ def register_lakeflow_source(spark):
         # SupportsPartitionedStream interface
         # ------------------------------------------------------------------
         def is_partitioned(self, table_name: str) -> bool:
-            """Only ``items`` partitions; snapshot tables use simpleStreamReader."""
+            """Only ``items`` partitions across executors.
+
+            The snapshot tables deliberately stay on the single-driver
+            ``simpleStreamReader`` path (their payloads are tiny, so fanning out
+            buys nothing). They still satisfy Spark's offset-advancement contract
+            via the synthetic init-time offset returned by ``read_table`` — see
+            ``_snapshot_end_offset``.
+            """
             return table_name == ITEMS_TABLE
 
         def latest_offset(
@@ -1057,15 +1075,52 @@ def register_lakeflow_source(spark):
         # ------------------------------------------------------------------
         # snapshot helpers
         # ------------------------------------------------------------------
+        def _snapshot_end_offset(self) -> dict:
+            """The synthetic, advancing offset for full-refresh snapshot tables.
+
+            Snapshot tables have no natural cursor, yet Spark's
+            ``SimpleDataSourceStreamReader`` rejects a non-empty batch whose end
+            offset does not advance past the start (``SIMPLE_STREAM_READER_
+            OFFSET_DID_NOT_ADVANCE``). We stamp each connector instance with an
+            init-time token and return ``{"snapshot": token}``:
+
+              * First micro-batch — ``start_offset`` is ``{}`` (≠ token), so we
+                emit the full snapshot and return the token. Offset advanced.
+              * Next call — ``start_offset`` already equals the token, so
+                ``_snapshot_caught_up`` is true: we emit nothing and return the
+                same token. ``end_offset == start_offset`` → Trigger.AvailableNow
+                terminates cleanly.
+              * Next trigger — a fresh instance has a newer token, so the snapshot
+                is re-read in full. That is exactly the full-refresh contract.
+
+            This is the single-driver analogue of the sanctioned partitioned
+            ``{"snapshot": init_time}`` pattern. In batch mode the framework
+            discards the offset entirely, so this is transparent there.
+            """
+            return {"snapshot": self._init_time}
+
+        def _snapshot_caught_up(self, start_offset: dict | None) -> bool:
+            """True once this instance has already emitted its snapshot.
+
+            Compares the incoming offset against this instance's init-time token.
+            Equality means the framework is feeding back the offset we just
+            returned, i.e. the single full-refresh batch is already committed.
+            """
+            return bool(start_offset) and start_offset.get("snapshot") == self._init_time
+
         def _read_updates_snapshot(
-            self, table_options: dict[str, str]
+            self, start_offset: dict | None, table_options: dict[str, str]
         ) -> tuple[Iterator[dict], dict]:
             """Read ``/updates.json`` as a single snapshot row.
 
             The endpoint returns ``{"items": [...], "profiles": [...]}``; we emit
-            one row holding both arrays plus the run's snapshot timestamp. Snapshot
-            reads carry no offset (return ``{}``).
+            one row holding both arrays plus the run's snapshot timestamp, with the
+            synthetic advancing offset (see ``_snapshot_end_offset``).
             """
+            if self._snapshot_caught_up(start_offset):
+                # Already emitted this instance's snapshot — converge.
+                return iter([]), dict(start_offset)
+
             session = self._new_session()
             try:
                 payload = self._get_json(session, "/updates.json")
@@ -1078,16 +1133,21 @@ def register_lakeflow_source(spark):
                 "profiles": payload.get("profiles"),
                 "snapshot_time": datetime.now(timezone.utc).isoformat(),
             }
-            return iter([row]), {}
+            return iter([row]), self._snapshot_end_offset()
 
         def _read_story_list_snapshot(
-            self, table_name: str, table_options: dict[str, str]
+            self, table_name: str, start_offset: dict | None, table_options: dict[str, str]
         ) -> tuple[Iterator[dict], dict]:
             """Read a ``{top,new,best}stories.json`` array as one row per id.
 
             Each row carries the story id, its 0-based rank in the ranked list,
-            and the run's snapshot timestamp. Full re-read each run; no offset.
+            and the run's snapshot timestamp. Full re-read each run, with the
+            synthetic advancing offset (see ``_snapshot_end_offset``).
             """
+            if self._snapshot_caught_up(start_offset):
+                # Already emitted this instance's snapshot — converge.
+                return iter([]), dict(start_offset)
+
             endpoint = STORY_LIST_ENDPOINTS[table_name]
             session = self._new_session()
             try:
@@ -1105,7 +1165,7 @@ def register_lakeflow_source(spark):
                 }
                 for rank, story_id in enumerate(ids)
             ]
-            return iter(records), {}
+            return iter(records), self._snapshot_end_offset()
 
 
     ########################################################

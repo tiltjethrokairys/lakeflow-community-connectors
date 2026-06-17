@@ -9,9 +9,20 @@ The ``items`` table is the headline incremental (append) stream. Because the
 source supports range queries over the id space — ``(start_id, end_id]`` via
 ``maxitem`` + per-id ``/item/{id}.json`` fetches — it is implemented as a
 ``SupportsPartitionedStream`` so the id range fans out across Spark executors.
+
 The four snapshot tables (``updates``, ``topstories``, ``newstories``,
-``beststories``) are full-refresh each run and fall back to the single-driver
-``simpleStreamReader`` path via ``is_partitioned() == False``.
+``beststories``) are full-refresh each run and use the single-driver
+``simpleStreamReader`` path via ``is_partitioned() == False`` — their payloads
+are tiny (a single ``updates`` blob, a ``<=500``-id list) so executor fan-out
+would buy nothing. They have no natural cursor, but Spark's
+``SimpleDataSourceStreamReader`` forbids returning a non-empty batch without
+advancing the offset past the start. So each snapshot read returns a
+*synthetic* init-time offset ``{"snapshot": self._init_time}``: it advances on
+the first micro-batch (emitting the full snapshot), then converges (the next
+call sees its own token and emits nothing), so Trigger.AvailableNow
+terminates. A later trigger builds a fresh instance with a newer token and
+re-reads the snapshot in full. This is the single-driver analogue of the
+sanctioned partitioned ``{"snapshot": init_time}`` pattern.
 
 Termination (Trigger.AvailableNow): the connector snapshots ``maxitem`` once
 at init time (``self._init_max_id``) and never lets ``latest_offset`` exceed
@@ -66,6 +77,13 @@ class HackerNewsLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
         # (the first time it is needed) so __init__ stays cheap and the
         # instance carries no eager network state.
         self._init_max_id_cache: Optional[int] = None
+        # Init-time token stamped on every snapshot-table micro-batch. The
+        # snapshot tables have no natural cursor, but Spark forbids emitting a
+        # non-empty batch without advancing the offset; this token is the
+        # synthetic offset that advances once then converges. See
+        # ``_snapshot_end_offset`` for the full rationale. A string is
+        # picklable, so it travels intact when Spark ships the reader.
+        self._init_time = datetime.now(timezone.utc).isoformat()
 
     # ------------------------------------------------------------------
     # HTTP helpers
@@ -158,9 +176,9 @@ class HackerNewsLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
         """
         self._validate_table(table_name)
         if table_name == UPDATES_TABLE:
-            return self._read_updates_snapshot(table_options)
+            return self._read_updates_snapshot(start_offset, table_options)
         if table_name in STORY_LIST_TABLES:
-            return self._read_story_list_snapshot(table_name, table_options)
+            return self._read_story_list_snapshot(table_name, start_offset, table_options)
         if table_name == ITEMS_TABLE:
             return self._read_items_sequential(start_offset, table_options)
         raise ValueError(f"Unhandled table '{table_name}'")
@@ -169,7 +187,14 @@ class HackerNewsLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
     # SupportsPartitionedStream interface
     # ------------------------------------------------------------------
     def is_partitioned(self, table_name: str) -> bool:
-        """Only ``items`` partitions; snapshot tables use simpleStreamReader."""
+        """Only ``items`` partitions across executors.
+
+        The snapshot tables deliberately stay on the single-driver
+        ``simpleStreamReader`` path (their payloads are tiny, so fanning out
+        buys nothing). They still satisfy Spark's offset-advancement contract
+        via the synthetic init-time offset returned by ``read_table`` — see
+        ``_snapshot_end_offset``.
+        """
         return table_name == ITEMS_TABLE
 
     def latest_offset(
@@ -376,15 +401,52 @@ class HackerNewsLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
     # ------------------------------------------------------------------
     # snapshot helpers
     # ------------------------------------------------------------------
+    def _snapshot_end_offset(self) -> dict:
+        """The synthetic, advancing offset for full-refresh snapshot tables.
+
+        Snapshot tables have no natural cursor, yet Spark's
+        ``SimpleDataSourceStreamReader`` rejects a non-empty batch whose end
+        offset does not advance past the start (``SIMPLE_STREAM_READER_
+        OFFSET_DID_NOT_ADVANCE``). We stamp each connector instance with an
+        init-time token and return ``{"snapshot": token}``:
+
+          * First micro-batch — ``start_offset`` is ``{}`` (≠ token), so we
+            emit the full snapshot and return the token. Offset advanced.
+          * Next call — ``start_offset`` already equals the token, so
+            ``_snapshot_caught_up`` is true: we emit nothing and return the
+            same token. ``end_offset == start_offset`` → Trigger.AvailableNow
+            terminates cleanly.
+          * Next trigger — a fresh instance has a newer token, so the snapshot
+            is re-read in full. That is exactly the full-refresh contract.
+
+        This is the single-driver analogue of the sanctioned partitioned
+        ``{"snapshot": init_time}`` pattern. In batch mode the framework
+        discards the offset entirely, so this is transparent there.
+        """
+        return {"snapshot": self._init_time}
+
+    def _snapshot_caught_up(self, start_offset: dict | None) -> bool:
+        """True once this instance has already emitted its snapshot.
+
+        Compares the incoming offset against this instance's init-time token.
+        Equality means the framework is feeding back the offset we just
+        returned, i.e. the single full-refresh batch is already committed.
+        """
+        return bool(start_offset) and start_offset.get("snapshot") == self._init_time
+
     def _read_updates_snapshot(
-        self, table_options: dict[str, str]
+        self, start_offset: dict | None, table_options: dict[str, str]
     ) -> tuple[Iterator[dict], dict]:
         """Read ``/updates.json`` as a single snapshot row.
 
         The endpoint returns ``{"items": [...], "profiles": [...]}``; we emit
-        one row holding both arrays plus the run's snapshot timestamp. Snapshot
-        reads carry no offset (return ``{}``).
+        one row holding both arrays plus the run's snapshot timestamp, with the
+        synthetic advancing offset (see ``_snapshot_end_offset``).
         """
+        if self._snapshot_caught_up(start_offset):
+            # Already emitted this instance's snapshot — converge.
+            return iter([]), dict(start_offset)
+
         session = self._new_session()
         try:
             payload = self._get_json(session, "/updates.json")
@@ -397,16 +459,21 @@ class HackerNewsLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
             "profiles": payload.get("profiles"),
             "snapshot_time": datetime.now(timezone.utc).isoformat(),
         }
-        return iter([row]), {}
+        return iter([row]), self._snapshot_end_offset()
 
     def _read_story_list_snapshot(
-        self, table_name: str, table_options: dict[str, str]
+        self, table_name: str, start_offset: dict | None, table_options: dict[str, str]
     ) -> tuple[Iterator[dict], dict]:
         """Read a ``{top,new,best}stories.json`` array as one row per id.
 
         Each row carries the story id, its 0-based rank in the ranked list,
-        and the run's snapshot timestamp. Full re-read each run; no offset.
+        and the run's snapshot timestamp. Full re-read each run, with the
+        synthetic advancing offset (see ``_snapshot_end_offset``).
         """
+        if self._snapshot_caught_up(start_offset):
+            # Already emitted this instance's snapshot — converge.
+            return iter([]), dict(start_offset)
+
         endpoint = STORY_LIST_ENDPOINTS[table_name]
         session = self._new_session()
         try:
@@ -424,4 +491,4 @@ class HackerNewsLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
             }
             for rank, story_id in enumerate(ids)
         ]
-        return iter(records), {}
+        return iter(records), self._snapshot_end_offset()

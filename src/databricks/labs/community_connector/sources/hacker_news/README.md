@@ -72,6 +72,10 @@ A single snapshot row per run. The row holds two arrays — `items` (ids of rece
 
 Each is the ranked story-id list from its endpoint, **expanded to one row per id**. Each row carries `story_id`, its 0-based `rank` in the list, and a `snapshot_time`. These lists change continuously, so each table is fully re-read on every run (snapshot). They contain only the story ids and rank — join to `items` on `story_id = id` to get the story content.
 
+### How the snapshot tables are read
+
+All four snapshot tables are **full-refresh**: every run re-reads the entire current list. The recommended SDP deployment reads them via a batch full-refresh (`apply_changes_from_snapshot`), and that is what the generated pipeline does. They also run correctly on the streaming path (`spark.readStream` + `Trigger.AvailableNow`): because a snapshot has no natural cursor, each run stamps a synthetic per-run offset (`{"snapshot": <run-time>}`) that advances once — emitting the full snapshot — and then converges so the trigger terminates. A later run re-reads the snapshot in full. You do not configure any of this; it is automatic. Unlike `items`, snapshot tables do **not** resume incrementally — each run is a complete re-read by design.
+
 ### Why there is no `users` table
 
 Hacker News users are reachable only at `/v0/user/{username}.json` by a **known** username. There is no list endpoint, no cursor, and no way to enumerate all users — they only appear as references (the `by` field on items, or the `updates.profiles` array). A first-class `users` stream is therefore not feasible, and the connector does not expose one. (The `askstories`, `showstories`, and `jobstories` snapshot lists also exist in the API but are not exposed in this connector.)

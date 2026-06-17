@@ -13,7 +13,11 @@ The connector is a ``SupportsPartitionedStream`` whose headline table,
 use the single-driver ``read_table`` path, so the base
 ``LakeflowConnectTests.test_read_table`` / ``test_read_terminates`` /
 ``test_every_column_populated_by_at_least_one_record`` exercise them while the
-``SupportsPartitionedStreamTests`` mixin covers ``items``.
+``SupportsPartitionedStreamTests`` mixin covers ``items``. Each snapshot read
+returns a synthetic, advancing init-time offset (``{"snapshot": _init_time}``)
+so the streaming simple-reader contract is satisfied and AvailableNow
+terminates — the snapshot-shape tests assert both the offset and that feeding
+it back converges.
 
 The custom simulator handler (``specs/hacker_news/handlers/hn.py``) advances
 ``/maxitem.json`` by ``_MAXITEM_STEP`` on every request, so a freshly-built
@@ -379,7 +383,12 @@ class TestHackerNewsSnapshotTables:
     def test_updates_snapshot_shape(self):
         records, offset = self.connector.read_table(UPDATES_TABLE, {}, {})
         rows = list(records)
-        assert offset == {}, "snapshot tables carry no offset"
+        # Snapshot tables return a synthetic, advancing init-time offset so
+        # the streaming simple-reader contract (non-empty batch must advance
+        # the offset) is satisfied. See HackerNews._snapshot_end_offset.
+        assert offset == {"snapshot": self.connector._init_time}, (
+            "snapshot read must advance to the synthetic init-time offset"
+        )
         assert len(rows) == 1, "updates emits exactly one snapshot row"
         row = rows[0]
         assert isinstance(row.get("items"), list) and row["items"], (
@@ -392,11 +401,19 @@ class TestHackerNewsSnapshotTables:
         assert all(isinstance(p, str) for p in row["profiles"])
         assert isinstance(row.get("snapshot_time"), str) and row["snapshot_time"]
 
+        # Feeding the offset back converges: no rows, same offset — this is
+        # what lets Trigger.AvailableNow terminate on the streaming path.
+        more, offset2 = self.connector.read_table(UPDATES_TABLE, offset, {})
+        assert list(more) == [], "a caught-up snapshot read must emit nothing"
+        assert offset2 == offset, "caught-up offset must equal the start offset"
+
     @pytest.mark.parametrize("table", list(STORY_LIST_TABLES))
     def test_story_list_snapshot_shape(self, table):
         records, offset = self.connector.read_table(table, {}, {})
         rows = list(records)
-        assert offset == {}, "snapshot tables carry no offset"
+        assert offset == {"snapshot": self.connector._init_time}, (
+            "snapshot read must advance to the synthetic init-time offset"
+        )
         assert rows, f"{table} should return at least one ranked-story row"
         for expected_rank, row in enumerate(rows):
             assert isinstance(row["story_id"], int)
@@ -406,3 +423,9 @@ class TestHackerNewsSnapshotTables:
             assert isinstance(row["snapshot_time"], str) and row["snapshot_time"]
         # Ranks are dense 0..N-1 in order.
         assert [r["rank"] for r in rows] == list(range(len(rows)))
+
+        # Convergence: feeding the offset back yields no rows and a stable
+        # offset, so the availableNow trigger terminates.
+        more, offset2 = self.connector.read_table(table, offset, {})
+        assert list(more) == [], "a caught-up snapshot read must emit nothing"
+        assert offset2 == offset, "caught-up offset must equal the start offset"
