@@ -241,9 +241,23 @@ class HackerNewsLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
         range from the resolved first id to the init-time snapshot is split.
         Each descriptor is ``{"start_id": a, "end_id": b}`` covering the
         half-open id range ``(a, b]`` — small and fully self-contained.
+
+        Snapshot tables are not partitioned (``is_partitioned`` is False), but
+        the batch reader keys off ``isinstance(conn, SupportsPartition)`` —
+        True for this connector because of ``items`` — and therefore calls
+        ``get_partitions`` for *every* table, snapshot ones included. We must
+        NOT return ``[]`` here: an empty partition list makes Spark invoke
+        ``read(None)`` and crash. Raising is the framework's documented
+        "not partitionable" signal — ``LakeflowBatchReader.partitions`` catches
+        it and falls back to a single ``InputPartition(None)``, i.e. a
+        whole-table ``read_table()``, which is exactly the snapshot full
+        refresh we want.
         """
         if table_name != ITEMS_TABLE:
-            return []
+            raise NotImplementedError(
+                f"{table_name} is a snapshot table and is not partitioned; "
+                f"read it via read_table()."
+            )
 
         init_max = self._init_max_id()
 
