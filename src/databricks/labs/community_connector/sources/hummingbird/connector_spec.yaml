@@ -1,0 +1,26 @@
+# Hummingbird Community Connector Spec
+# Defines the Unity Catalog connection parameters and the per-table options
+# allowlist for the Hummingbird Case Management API.
+
+display_name: Hummingbird
+connection:
+  parameters:
+    - name: client_id
+      type: string
+      required: true
+      description: >
+        OAuth 2.0 client-credentials client ID for the Hummingbird API.
+    - name: client_secret
+      type: string
+      required: true
+      description: >
+        OAuth 2.0 client-credentials client secret for the Hummingbird API.
+    - name: base_url
+      type: string
+      required: false
+      description: >
+        Override the API base URL. Defaults to https://api.hummingbird.co.
+
+# Per-table options forwarded to read_table via table_options. Must be on the
+# UC connection's externalOptionsAllowList to take effect.
+external_options_allowlist: "start_date,end_date,window_days,max_windows_per_batch"
